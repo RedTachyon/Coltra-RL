@@ -10,7 +10,7 @@ from tqdm import trange
 from agents import BaseAgent, Agent, StillAgent, RandomAgent
 from preprocessors import simple_padder
 from utils import DataBatch, with_default_config, np_float, transpose_batch, concat_batches
-from envs import MultiAgentEnv
+from base_env import MultiAgentEnv
 
 T = TypeVar('T')
 

@@ -5,7 +5,7 @@ import torch
 
 from agents import Agent
 from models import BaseModel, RelationModel, MLPModel
-from trainers import PPOTwogoalTrainer, PPOSamplingTrainer
+from trainers import PPOSamplingTrainer
 
 CUDA = torch.cuda.is_available()
 

@@ -46,16 +46,3 @@ class MultiAgentEnv(gym.Env):
     @property
     def current_obs(self):
         raise NotImplementedError
-
-
-class VectorizedEnv(MultiAgentEnv):
-    def __init__(self, env_creator: Callable[..., MultiAgentEnv], env_args: Dict, n: int):
-        super().__init__()
-        self.env_creator = env_creator
-        self.env_args = env_args
-        self.envs: List[MultiAgentEnv] = [env_creator(**env_args) for _ in range(n)]
-
-    def reset(self):
-        observations = []
-        for env in self.envs:
-            obs_dict = env.reset()

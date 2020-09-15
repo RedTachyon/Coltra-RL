@@ -4,7 +4,7 @@ import torch
 from torch import nn, Tensor
 from torch.distributions import Categorical, Normal
 
-from models import BaseModel, MLPModel, LSTMModel, SkillPredictor
+from models import BaseModel
 
 from typing import Tuple
 
@@ -55,12 +55,9 @@ class Agent(BaseAgent):
         super().__init__(model)
         self.stateful = model.stateful
 
-        self.tom_params = getattr(self.model, "tom_params", 0)
-
     def compute_actions(self, obs_batch: Tensor,
                         state_batch: Tuple = (),
-                        deterministic: bool = False,
-                        tom: Tensor = None) -> Tuple[Tensor, Tensor, Tuple, Tensor]:
+                        deterministic: bool = False) -> Tuple[Tensor, Tensor, Tuple]:
         """
         Computes the action for a batch of observations with given hidden states. Breaks gradients.
 
@@ -68,7 +65,6 @@ class Agent(BaseAgent):
             obs_batch: observation array in shape either (batch_size, obs_size)
             state_batch: tuple of state tensors of shape (batch_size, lstm_nodes)
             deterministic: whether to always take the best action
-            tom: [batch_size, tom_params] tensor holding the ToM GT parameters
 
         Returns:
             action, logprob of the action, new state vectors
@@ -76,7 +72,7 @@ class Agent(BaseAgent):
         action_distribution: Categorical
         states: Tuple
         with torch.no_grad():
-            action_distribution, states, extra_outputs = self.model(obs_batch, state_batch, tom=tom)
+            action_distribution, states, extra_outputs = self.model(obs_batch, state_batch)
 
         if deterministic:
             actions = torch.argmax(action_distribution.probs, dim=-1)
@@ -85,12 +81,11 @@ class Agent(BaseAgent):
 
         logprobs = action_distribution.log_prob(actions)
 
-        return actions, logprobs, states, extra_outputs["sm"]
+        return actions, logprobs, states
 
     def compute_single_action(self, obs: np.ndarray,
                               state: Tuple[Tensor, ...] = (),
-                              deterministic: bool = False,
-                              tom: np.ndarray = None) -> Tuple[int, float, Tuple, float]:
+                              deterministic: bool = False) -> Tuple[int, float, Tuple]:
         """
         Computes the action for a single observation with the given hidden state. Breaks gradients.
 
@@ -98,36 +93,29 @@ class Agent(BaseAgent):
             obs: flat observation array in shape either
             state: tuple of state tensors of shape (1, lstm_nodes)
             deterministic: boolean, whether to always take the best action
-            tom: flat array of ToM GT parameters
 
         Returns:
             action, logprob of the action, new state vectors
         """
         obs = torch.tensor([obs])
-        if tom is not None:
-            tom = torch.tensor([tom])
 
         with torch.no_grad():
-            action, logprob, new_state, sm = self.compute_actions(obs, state, deterministic, tom=tom)
+            action, logprob, new_state = self.compute_actions(obs, state, deterministic)
 
-        return action.item(), logprob.item(), new_state, sm.item()
+        return action.item(), logprob.item(), new_state
 
     def compute_action_probs(self, obs: np.ndarray,
                              state: Tuple[Tensor, ...] = (),
-                             deterministic: bool = False,
-                             tom: np.ndarray = None) -> Tuple[int, np.ndarray, Tuple, np.ndarray]:
+                             deterministic: bool = False) -> Tuple[int, np.ndarray, Tuple]:
         """
         Same as above, but also returns the action probs - for the manual mode
         """
         obs = torch.tensor([obs])
-        if tom is not None:
-            tom = torch.tensor([tom])
 
         action_distribution: Categorical
         states: Tuple
         with torch.no_grad():
-            action_distribution, states, extra_outputs = self.model(obs, state, tom=tom)
-            sm_preds = extra_outputs["sm"]
+            action_distribution, states, extra_outputs = self.model(obs, state)
 
         if deterministic:
             actions = torch.argmax(action_distribution.probs, dim=-1)
@@ -137,10 +125,10 @@ class Agent(BaseAgent):
         action = actions.item()
         probs = action_distribution.probs.cpu().numpy().ravel()
 
-        return action, probs, states, sm_preds.cpu().numpy().ravel()
+        return action, probs, states
 
     def evaluate_actions(self, data_batch: AgentDataBatch,
-                         padded: bool = False) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+                         padded: bool = False) -> Tuple[Tensor, Tensor, Tensor]:
         """
         Computes action logprobs, observation values and policy entropy for each of the (obs, action, hidden_state)
         transitions. Preserves all the necessary gradients.
@@ -156,16 +144,13 @@ class Agent(BaseAgent):
         """
         obs_batch = data_batch['observations']
         action_batch = data_batch['actions']
-        tom_batch = data_batch['toms']
         state_batch = data_batch['states']
         if not padded:  # BP or non-recurrent
-            action_distribution, new_states, extra_outputs = self.model(obs_batch, state_batch, tom=tom_batch)
+            action_distribution, new_states, extra_outputs = self.model(obs_batch, state_batch)
             values = extra_outputs["value"]
-            sm_preds = extra_outputs["sm"]
             action_logprobs = action_distribution.log_prob(action_batch)
             values = values.view(-1)
             entropies = action_distribution.entropy()
-            sm_preds = sm_preds.view(-1)
 
         else:  # padded == True, BPTT
             batch_size = obs_batch.size()[1]  # assume it's padded, so in [L, B, *] format
@@ -174,20 +159,17 @@ class Agent(BaseAgent):
             entropies = []
             action_logprobs = []
             values = []
-            sm_preds = []
             # states_cache = [state]
             # breakpoint()
 
-            for (obs, action, tom) in zip(obs_batch, action_batch, tom_batch):
-                action_distribution, new_state, extra_outputs = self.model(obs, state, tom=tom)
+            for (obs, action) in zip(obs_batch, action_batch):
+                action_distribution, new_state, extra_outputs = self.model(obs, state)
                 value = extra_outputs["value"]
-                sm_pred = extra_outputs["sm"]
                 action_logprob = action_distribution.log_prob(action)
                 entropy = action_distribution.entropy()
                 action_logprobs.append(action_logprob)
                 values.append(value.T)
                 entropies.append(entropy)
-                sm_preds.append(sm_pred)
 
                 state = new_state
                 # states_cache.append(state)
@@ -195,9 +177,8 @@ class Agent(BaseAgent):
             action_logprobs = torch.stack(action_logprobs)
             values = torch.cat(values, dim=0)
             entropies = torch.stack(entropies)
-            sm_preds = torch.stack(sm_preds)
 
-        return action_logprobs, values, entropies, sm_preds
+        return action_logprobs, values, entropies
 
 
 class ContinuousAgent(BaseAgent):
@@ -208,12 +189,9 @@ class ContinuousAgent(BaseAgent):
         super().__init__(model)
         self.stateful = model.stateful
 
-        self.tom_params = getattr(self.model, "tom_params", 0)
-
     def compute_actions(self, obs_batch: Tensor,
                         state_batch: Tuple = (),
-                        deterministic: bool = False,
-                        tom: Tensor = None) -> Tuple[Tensor, Tensor, Tuple, Tensor]:
+                        deterministic: bool = False) -> Tuple[Tensor, Tensor, Tuple]:
         """
         Computes the action for a batch of observations with given hidden states. Breaks gradients.
 
@@ -221,7 +199,6 @@ class ContinuousAgent(BaseAgent):
             obs_batch: observation array in shape either (batch_size, obs_size)
             state_batch: tuple of state tensors of shape (batch_size, lstm_nodes)
             deterministic: whether to always take the best action
-            tom: [batch_size, tom_params] tensor holding the ToM GT parameters
 
         Returns:
             action, logprob of the action, new state vectors
@@ -229,7 +206,7 @@ class ContinuousAgent(BaseAgent):
         action_distribution: Normal
         states: Tuple
         with torch.no_grad():
-            action_distribution, states, extra_outputs = self.model(obs_batch, state_batch, tom=tom)
+            action_distribution, states, extra_outputs = self.model(obs_batch, state_batch)
 
         if deterministic:
             actions = action_distribution.loc
@@ -238,12 +215,11 @@ class ContinuousAgent(BaseAgent):
 
         logprobs = action_distribution.log_prob(actions).sum(1)
 
-        return actions, logprobs, states, extra_outputs["sm"]
+        return actions, logprobs, states
 
     def compute_single_action(self, obs: np.ndarray,
                               state: Tuple[Tensor, ...] = (),
-                              deterministic: bool = False,
-                              tom: np.ndarray = None) -> Tuple[np.ndarray, float, Tuple, float]:
+                              deterministic: bool = False) -> Tuple[np.ndarray, float, Tuple]:
         """
         Computes the action for a single observation with the given hidden state. Breaks gradients.
 
@@ -251,36 +227,29 @@ class ContinuousAgent(BaseAgent):
             obs: flat observation array in shape either
             state: tuple of state tensors of shape (1, lstm_nodes)
             deterministic: boolean, whether to always take the best action
-            tom: flat array of ToM GT parameters
 
         Returns:
             action, logprob of the action, new state vectors
         """
         obs = torch.tensor([obs])
-        if tom is not None:
-            tom = torch.tensor([tom])
 
         with torch.no_grad():
-            action, logprob, new_state, sm = self.compute_actions(obs, state, deterministic, tom=tom)
+            action, logprob, new_state = self.compute_actions(obs, state, deterministic)
 
-        return action.numpy().ravel(), logprob.item(), new_state, sm.item()
+        return action.numpy().ravel(), logprob.item(), new_state
 
     def compute_action_probs(self, obs: np.ndarray,
                              state: Tuple[Tensor, ...] = (),
-                             deterministic: bool = False,
-                             tom: np.ndarray = None) -> Tuple[int, np.ndarray, Tuple, np.ndarray]:
+                             deterministic: bool = False) -> Tuple[int, np.ndarray, Tuple]:
         """
         Same as above, but also returns the action probs - for the manual mode
         """
         obs = torch.tensor([obs])
-        if tom is not None:
-            tom = torch.tensor([tom])
 
         action_distribution: Categorical
         states: Tuple
         with torch.no_grad():
-            action_distribution, states, extra_outputs = self.model(obs, state, tom=tom)
-            sm_preds = extra_outputs["sm"]
+            action_distribution, states, extra_outputs = self.model(obs, state)
 
         if deterministic:
             actions = torch.argmax(action_distribution.probs, dim=-1)
@@ -290,10 +259,10 @@ class ContinuousAgent(BaseAgent):
         action = actions.item()
         probs = action_distribution.probs.cpu().numpy().ravel()
 
-        return action, probs, states, sm_preds.cpu().numpy().ravel()
+        return action, probs, states
 
     def evaluate_actions(self, data_batch: AgentDataBatch,
-                         padded: bool = False) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+                         padded: bool = False) -> Tuple[Tensor, Tensor, Tensor]:
         """
         Computes action logprobs, observation values and policy entropy for each of the (obs, action, hidden_state)
         transitions. Preserves all the necessary gradients.
@@ -309,16 +278,13 @@ class ContinuousAgent(BaseAgent):
         """
         obs_batch = data_batch['observations']
         action_batch = data_batch['actions']
-        tom_batch = data_batch['toms']
         state_batch = data_batch['states']
         if not padded:  # BP or non-recurrent
-            action_distribution, new_states, extra_outputs = self.model(obs_batch, state_batch, tom=tom_batch)
+            action_distribution, new_states, extra_outputs = self.model(obs_batch, state_batch)
             values = extra_outputs["value"]
-            sm_preds = extra_outputs["sm"]
             action_logprobs = action_distribution.log_prob(action_batch).sum(1)
             values = values.view(-1)
             entropies = action_distribution.entropy().sum(1)
-            sm_preds = sm_preds.view(-1)
 
         else:  # padded == True, BPTT
             # TODO: Might not work, copied from Agent
@@ -328,20 +294,17 @@ class ContinuousAgent(BaseAgent):
             entropies = []
             action_logprobs = []
             values = []
-            sm_preds = []
             # states_cache = [state]
             # breakpoint()
 
-            for (obs, action, tom) in zip(obs_batch, action_batch, tom_batch):
-                action_distribution, new_state, extra_outputs = self.model(obs, state, tom=tom)
+            for (obs, action) in zip(obs_batch, action_batch):
+                action_distribution, new_state, extra_outputs = self.model(obs, state)
                 value = extra_outputs["value"]
-                sm_pred = extra_outputs["sm"]
                 action_logprob = action_distribution.log_prob(action)
                 entropy = action_distribution.entropy()
                 action_logprobs.append(action_logprob)
                 values.append(value.T)
                 entropies.append(entropy)
-                sm_preds.append(sm_pred)
 
                 state = new_state
                 # states_cache.append(state)
@@ -349,9 +312,8 @@ class ContinuousAgent(BaseAgent):
             action_logprobs = torch.stack(action_logprobs)
             values = torch.cat(values, dim=0)
             entropies = torch.stack(entropies)
-            sm_preds = torch.stack(sm_preds)
 
-        return action_logprobs, values, entropies, sm_preds
+        return action_logprobs, values, entropies
 
 
 class StillAgent(BaseAgent):
@@ -360,7 +322,7 @@ class StillAgent(BaseAgent):
         self.action_value = action_value
 
     def compute_actions(self, obs_batch: Tensor,
-                        *args, **kwargs) -> Tuple[Tensor, Tensor, Tuple, Tensor]:
+                        *args, **kwargs) -> Tuple[Tensor, Tensor, Tuple]:
         batch_size = obs_batch.shape[0]
         actions = torch.ones(batch_size) * self.action_value
         actions = actions.to(torch.int64)
@@ -369,16 +331,12 @@ class StillAgent(BaseAgent):
 
         states = ()
 
-        extra_outputs = {
-            "sm": torch.zeros(batch_size)
-        }
-
-        return actions, logprobs, states, extra_outputs["sm"]
+        return actions, logprobs, states
 
     def compute_single_action(self, obs: np.ndarray,
-                              *args, **kwargs) -> Tuple[int, float, Tuple, float]:
+                              *args, **kwargs) -> Tuple[int, float, Tuple]:
 
-        return self.action_value, 0., (), 0.
+        return self.action_value, 0., ()
 
     def evaluate_actions(self, data_batch: AgentDataBatch, padded: bool = False):
         batch_size = data_batch["observations"].shape[0]
@@ -386,9 +344,8 @@ class StillAgent(BaseAgent):
         action_logprobs = torch.zeros(batch_size)
         values = torch.zeros(batch_size)
         entropies = torch.zeros(batch_size)
-        sm_preds = torch.zeros(batch_size)
 
-        return action_logprobs, values, entropies, sm_preds
+        return action_logprobs, values, entropies
 
 
 class RandomAgent(BaseAgent):
@@ -397,7 +354,7 @@ class RandomAgent(BaseAgent):
         self.action_value = action_value
 
     def compute_actions(self, obs_batch: Tensor,
-                        *args, **kwargs) -> Tuple[Tensor, Tensor, Tuple, Tensor]:
+                        *args, **kwargs) -> Tuple[Tensor, Tensor, Tuple]:
         batch_size = obs_batch.shape[0]
         actions = torch.randint(0, self.action_value + 1, (batch_size,))
         actions = actions.to(torch.int64)
@@ -406,16 +363,12 @@ class RandomAgent(BaseAgent):
 
         states = ()
 
-        extra_outputs = {
-            "sm": torch.zeros(batch_size)
-        }
-
-        return actions, logprobs, states, extra_outputs["sm"]
+        return actions, logprobs, states
 
     def compute_single_action(self, obs: np.ndarray,
-                              *args, **kwargs) -> Tuple[int, float, Tuple, float]:
+                              *args, **kwargs) -> Tuple[int, float, Tuple]:
 
-        return torch.randint(0, self.action_value + 1, (1,)).item(), 0., (), 0.
+        return torch.randint(0, self.action_value + 1, (1,)).item(), 0., ()
 
     def evaluate_actions(self, data_batch: AgentDataBatch, padded: bool = False):
         batch_size = data_batch["observations"].shape[0]
@@ -423,6 +376,5 @@ class RandomAgent(BaseAgent):
         action_logprobs = torch.zeros(batch_size)
         values = torch.zeros(batch_size)
         entropies = torch.zeros(batch_size)
-        sm_preds = torch.zeros(batch_size)
 
-        return action_logprobs, values, entropies, sm_preds
+        return action_logprobs, values, entropies
