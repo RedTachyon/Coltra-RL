@@ -9,7 +9,7 @@ from tqdm import trange
 
 from agents import BaseAgent, Agent, StillAgent, RandomAgent
 from preprocessors import simple_padder
-from utils import DataBatch, with_default_config, np_float, transpose_batch, concat_batches
+from utils import DataBatch, with_default_config, np_float, transpose_batch, concat_batches, unpack, pack
 from base_env import MultiAgentEnv
 
 T = TypeVar('T')
@@ -50,48 +50,27 @@ class Memory:
     }
     """
 
-    def __init__(self, agents: List[str]):
+    def __init__(self, agents: List[str], fields: List[str] = None):
         """
         Creates the memory container. The only argument is a list of agent names to set up the dictionaries.
 
         Args:
             agents: names of agents
         """
+        if fields is None:
+            self.fields = ['observations', 'actions', 'rewards', 'logprobs', 'dones']
+        else:
+            self.fields = fields
 
         self.agents = agents
 
-        # Dictionaries to hold all the relevant data, with appropriate type annotations
-        _observations: Dict[str, List[np.ndarray]] = {agent: [] for agent in self.agents}
-        _actions: Dict[str, List[int]] = {agent: [] for agent in self.agents}
-        _rewards: Dict[str, List[float]] = {agent: [] for agent in self.agents}
-        _logprobs: Dict[str, List[float]] = {agent: [] for agent in self.agents}
-        _dones: Dict[str, List[bool]] = {agent: [] for agent in self.agents}
-        _toms: Dict[str, List[np.ndarray]] = {agent: [] for agent in self.agents}
-        _sms: Dict[str, List[np.ndarray]] = {agent: [] for agent in self.agents}
-        _states: Dict[str, List[Tuple[Tensor, ...]]] = {agent: [] for agent in self.agents}
-
         self.data = {
-            "observations": _observations,
-            "actions": _actions,
-            "rewards": _rewards,
-            "logprobs": _logprobs,
-            "dones": _dones,
-            "toms": _toms,
-            "sms": _sms,
-            "states": _states,
+            field: {agent: [] for agent in self.agents}
+            for field in self.fields
         }
 
-    def store(self,
-              obs: Dict[str, np.ndarray],
-              action: Dict[str, int],
-              reward: Dict[str, float],
-              logprob: Dict[str, float],
-              done: Dict[str, bool],
-              tom: Dict[str, np.ndarray],
-              sm: Dict[str, np.ndarray],
-              state: Dict[str, Tuple[Tensor, ...]]):
-
-        update = (obs, action, reward, logprob, done, tom, sm, state)
+    def store(self, *args):
+        update = args
         for key, var in zip(self.data, update):
             append_dict(var, self.data[key])
 
@@ -108,43 +87,9 @@ class Memory:
         """
         Gather all the recorded data into torch tensors (still keeping the dictionary structure)
         """
-        observations = self.apply_to_agent(lambda agent: torch.tensor(np.stack(self.data["observations"][agent])))
-        actions = self.apply_to_agent(lambda agent: torch.tensor(self.data["actions"][agent]))
-        rewards = self.apply_to_agent(lambda agent: torch.tensor(self.data["rewards"][agent]))
-        logprobs = self.apply_to_agent(lambda agent: torch.tensor(self.data["logprobs"][agent]))
-        dones = self.apply_to_agent(lambda agent: torch.tensor(self.data["dones"][agent]))
-        # breakpoint()
-        try:
-            toms = self.apply_to_agent(lambda agent: torch.tensor(np.stack(self.data["toms"][agent]).astype(np.float32)))
-        except TypeError:  # ToM variables are Nones - as in none have been passed into the collector
-            toms = self.apply_to_agent(lambda agent: torch.empty(len(self.data['toms'][agent]), 0))
-
-        sms = self.apply_to_agent(lambda agent: torch.tensor(np.stack(self.data["sms"][agent]).astype(np.float32)))
-
-        def stack_states(states_: List[Tuple[Tensor, ...]]):
-            # transposed_states: Tuple[List[Tensor], ...] = tuple(list(i) for i in zip(*states_))
-            # ([h1, h2, ...], [c1, c2, ...]) /\
-
-            transposed_states: Tuple[List[Tensor], ...] = tuple(list(i) for i in zip(*states_))
-            # ([h1, h2, ...], [c1, c2, ...]) /\
-
-            tensor_states: Tuple[Tensor, ...] = tuple(torch.cat(state_type) for state_type in transposed_states)
-            # (tensor(h1, h2, ...), tensor(c1, c2, ...)) /\
-
-            return tensor_states
-
-        states: Dict[str, List[Tuple[Tensor, ...]]] = self.data["states"]
-        states = self.apply_to_agent(lambda agent: stack_states(states[agent]))
-
         torch_data = {
-            "observations": observations,  # (batch_size, obs_size) float
-            "actions": actions,  # (batch_size, ) int
-            "rewards": rewards,  # (batch_size, ) float
-            "logprobs": logprobs,  # (batch_size, ) float
-            "dones": dones,  # (batch_size, ) bool
-            "toms": toms,  # (batch_size, tom_params)
-            "sms": sms,
-            "states": states,  # (batch_size, 2, lstm_nodes),
+            field: self.apply_to_agent(lambda agent: torch.tensor(self.data[field][agent]))
+            for field in self.fields
         }
 
         return torch_data
@@ -161,30 +106,23 @@ class Collector:
     Class to perform data collection from two agents.
     """
 
-    def __init__(self, agents: Dict[str, Agent], env: MultiAgentEnv, config: Dict):
+    def __init__(self, agents: Dict[str, BaseAgent], env: MultiAgentEnv):
         self.agents = agents
         self.agent_ids: List[str] = list(self.agents.keys())
         self.env = env
         self.memory = Memory(self.agent_ids)
 
-        default_config = {
-            # Whether or not to finish the last episode, even if that would exceed the step count
-            "finish_episode": True,
-        }
-
-        self.config = with_default_config(config, default_config)
 
     def collect_data(self,
                      num_steps: Optional[int] = None,
                      num_episodes: Optional[int] = None,
                      deterministic: Optional[Dict[str, bool]] = None,
-                     tom: Optional[Dict[str, np.ndarray]] = None,
                      disable_tqdm: bool = True,
                      max_steps: int = 102,
                      reset_memory: bool = True,
                      include_last: bool = False,
                      reset_start: bool = True,
-                     env_goal_rewards: Tuple[float, float] = (.6, .2)) -> DataBatch:
+                     finish_episode: bool = False) -> DataBatch:
         """
         Performs a rollout of the agents in the environment, for an indicated number of steps or episodes.
 
@@ -192,12 +130,12 @@ class Collector:
             num_steps: number of steps to take; either this or num_episodes has to be passed (not both)
             num_episodes: number of episodes to generate
             deterministic: whether each agent should use the greedy policy; False by default
-            tom: dictionary with GT parameters of the other agent
             disable_tqdm: whether a live progress bar should be (not) displayed
             max_steps: maximum number of steps that can be taken in episodic mode, recommended just above env maximum
             reset_memory: whether to reset the memory before generating data
             include_last: whether to include the last observation in episodic mode - useful for visualizations
             reset_start: whether the environment should be reset at the beginning of collection
+            finish_episode: whether the final episode should be finished, even if it goes over the step limit
 
         Returns: dictionary with the gathered data in the following format:
 
@@ -230,16 +168,11 @@ class Collector:
         if deterministic is None:
             deterministic = {agent_id: False for agent_id in self.agent_ids}
 
-        if tom is None:
-            tom = {agent_id: None for agent_id in self.agent_ids}
-
-        if reset_memory:
+        if reset_memory:  # clears the memory cache
             self.reset()
 
         if reset_start:
-            obs = self.env.reset(env_goal_rewards)
-        else:
-            obs = self.env.current_obs
+            self.env.reset()
 
         state = {
             agent_id: self.agents[agent_id].get_initial_state(requires_grad=False) for agent_id in self.agent_ids
@@ -248,14 +181,13 @@ class Collector:
         episode = 0
 
         end_flag = False
-        full_steps = (num_steps + 100 * int(self.config["finish_episode"])) if num_steps else max_steps * num_episodes
+        full_steps = (num_steps + 100 * int(finish_episode)) if num_steps else max_steps * num_episodes
         for step in trange(full_steps, disable=disable_tqdm):
             # Compute the action for each agent
             action_info = {  # action, logprob, entropy, state, sm
                 agent_id: self.agents[agent_id].compute_single_action(obs[agent_id],
                                                                       state[agent_id],
-                                                                      deterministic[agent_id],
-                                                                      tom[agent_id])
+                                                                      deterministic[agent_id])
                 for agent_id in self.agent_ids
             }
 
@@ -269,16 +201,16 @@ class Collector:
             next_obs, reward, done, info = self.env.step(action)
 
             # Saving to memory
-            self.memory.store(obs, action, reward, logprob, done, tom, sm_pred, state)
+            self.memory.store(obs, action, reward, logprob, done, state)
 
             # Handle episode/loop ending
-            if self.config["finish_episode"] and step + 1 == num_steps:
+            if finish_episode and step + 1 == num_steps:
                 end_flag = True
 
             # Update the current obs and state - either reset, or keep going
             if all(done.values()):  # episode is over
                 if include_last:  # record the last observation along with placeholder action/reward/logprob
-                    self.memory.store(next_obs, action, reward, logprob, done, tom, next_state)
+                    self.memory.store(next_obs, action, reward, logprob, done, next_state)
 
                 # Episode mode handling
                 episode += 1
@@ -290,7 +222,7 @@ class Collector:
                     break
 
                 # If we didn't end, create a new environment
-                obs = self.env.reset(env_goal_rewards)
+                obs = self.env.reset()
 
                 state = {
                     agent_id: self.agents[agent_id].get_initial_state(requires_grad=False)
@@ -317,81 +249,6 @@ class Collector:
         for agent_id in agents_to_update:
             if agent_id in self.agents:
                 self.agents[agent_id].model.load_state_dict(agents_to_update[agent_id])
-
-
-def collect_training_batch(collector: Collector,
-                           main_weights: Dict,
-                           old_weights: List[Dict],
-                           num_episodes: int = 100) -> Tuple[Dict, Tensor]:
-    """Collects a batch of data with an expert and a novice, concats those batches and pads them for use in a separate
-    SM predictor. To be developed further."""
-
-    collector.update_agent_state_dict({
-        "Agent0": main_weights,
-        "Agent1": old_weights[-1]
-    })
-
-    expert_data = collector.collect_data(num_episodes=num_episodes, tom={
-        "Agent0": np_float(1.),
-        "Agent1": np_float(1.)
-    })
-
-    collector.update_agent_state_dict({
-        "Agent1": old_weights[0],
-    })
-
-    novice_data = collector.collect_data(num_episodes=num_episodes, tom={
-        "Agent0": np_float(0.),
-        "Agent1": np_float(1.),
-    })
-
-    agent_novice_data = transpose_batch(novice_data)['Agent0']
-    agent_expert_data = transpose_batch(expert_data)['Agent0']
-
-    agent_data = concat_batches([agent_novice_data, agent_expert_data])
-
-    padded_batch, mask = simple_padder(agent_data)
-
-    return padded_batch, mask
-
-
-def collect_simple_batch(collector: Collector,
-                         num_episodes: int = 100,
-                         padding: bool = True) -> Tuple[Dict, Tensor]:
-    """Collects a batch of data with an expert and a novice, concats those batches and pads them for use in a separate
-    SM predictor. To be developed further."""
-
-    collector.change_agent({
-        "Agent0": RandomAgent(),
-        "Agent1": StillAgent()
-    })
-
-    expert_data = collector.collect_data(num_episodes=num_episodes, tom={
-        "Agent0": np_float(1.),
-        "Agent1": np_float(1.)
-    })
-
-    collector.change_agent({
-        "Agent0": StillAgent(),
-    })
-
-    novice_data = collector.collect_data(num_episodes=num_episodes, tom={
-        "Agent0": np_float(0.),
-        "Agent1": np_float(0.),
-    })
-
-    agent_novice_data = transpose_batch(novice_data)['Agent0']
-    agent_expert_data = transpose_batch(expert_data)['Agent0']
-
-    agent_data = concat_batches([agent_novice_data, agent_expert_data])
-
-    if padding:
-        padded_batch, mask = simple_padder(agent_data)
-    else:
-        padded_batch = agent_data
-        mask = None
-
-    return padded_batch, mask
 
 if __name__ == '__main__':
     pass

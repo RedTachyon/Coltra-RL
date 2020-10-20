@@ -9,8 +9,7 @@ from torch.utils.tensorboard import SummaryWriter
 from agents import Agent
 from preprocessors import simple_padder
 from utils import with_default_config, get_optimizer, DataBatch, Timer, DataBatchT, transpose_batch, AgentDataBatch, \
-    discount_rewards_to_go, masked_mean, get_episode_lens, write_dict, get_final_action_ratios, \
-    batch_to_gpu
+    discount_rewards_to_go, masked_mean, get_episode_lens, write_dict, batch_to_gpu
 
 
 class PPOptimizer:
@@ -57,10 +56,6 @@ class PPOptimizer:
 
             # GPU
             "use_gpu": False,
-
-            # SM loss
-            "use_sm": False,
-            "sm_coeff": 1e-1,
         }
         self.config = with_default_config(config, default_config)
 
@@ -126,7 +121,7 @@ class PPOptimizer:
             tom_batch = agent_batch['toms']  # GT skill level of the other agent
 
             # Evaluate actions to have values that require gradients
-            logprob_batch, value_batch, entropy_batch, sm_batch = agent.evaluate_actions(agent_batch,
+            logprob_batch, value_batch, entropy_batch = agent.evaluate_actions(agent_batch,
                                                                                          padded=self.config[
                                                                                              "pad_sequences"])
 

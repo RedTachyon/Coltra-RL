@@ -8,8 +8,8 @@ from utils import with_default_config, get_activation_module, get_initializer
 
 
 class RelationLayer(nn.Module):
-    """
-    A version of the relation layer that supports two final goals with separate embeddings rather than just one
+    """DEPRECATED
+    Will need rewriting to accommodate crowds
     """
     def __init__(self, config: Dict[str, Any]):
         super().__init__()
@@ -22,16 +22,14 @@ class RelationLayer(nn.Module):
             "initializer": "xavier_uniform",
 
             "num_goals": 1,
-
-            "tom_params": 0,  # int, count of ToM parameters in use, appended to the rellayers output
         }
 
         self.config = with_default_config(config, default_config)
 
         self.activation: nn.Module = get_activation_module(self.config["activation"])
-        self.tom_params = self.config["tom_params"]
         self.goals = self.config["num_goals"]
 
+        # Needs to be generalized
         self.own_embedding = nn.Parameter(torch.randn(self.config["emb_size"]) / 10., requires_grad=True)
         self.agent_embedding = nn.Parameter(torch.randn(self.config["emb_size"]) / 10., requires_grad=True)
         self.subgoal_embedding = nn.Parameter(torch.randn(self.config["emb_size"]) / 10., requires_grad=True)
@@ -39,7 +37,7 @@ class RelationLayer(nn.Module):
         self.goal2_embedding = nn.Parameter(torch.randn(self.config["emb_size"]) / 10., requires_grad=True)
 
         rel_sizes = (2 * (self.config["emb_size"] + 3),) + self.config["rel_hiddens"]
-        mlp_sizes = (self.config["rel_hiddens"][-1] + self.tom_params,) + self.config["mlp_hiddens"]
+        mlp_sizes = (self.config["rel_hiddens"][-1],) + self.config["mlp_hiddens"]
 
         _relation_layers = tuple(
             (nn.Linear(in_size, out_size), self.activation())
@@ -68,13 +66,8 @@ class RelationLayer(nn.Module):
                 if hasattr(layer, "bias"):
                     nn.init.zeros_(layer.bias)
 
-    def forward(self, x: Tensor, tom: Tensor = None) -> Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         """Forward pass of the model"""
-
-        if getattr(self, "tom_params", 0) == 0:  # if something unexpected is passed, ignore it
-            tom = None
-        assert (tom is None) or (tom.shape[-1] == self.tom_params), ValueError(f"Only {tom.shape[-1]} ToM parameters "
-                                                                               f"passed, expected {self.tom_params}")
 
         object_size = 3  # (x, y, flag)
         input_size = x.size()  # = (batch, [seq,] num_obj*3)
@@ -113,9 +106,6 @@ class RelationLayer(nn.Module):
 
         rel_outputs = self.relation_layers(full_input)
         rel_outputs = torch.sum(rel_outputs, dim=-2)
-
-        if tom is not None:
-            rel_outputs = torch.cat([rel_outputs, tom], dim=-1)
 
         final_output = self.mlp_layers(rel_outputs)
         return final_output

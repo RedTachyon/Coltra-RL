@@ -46,3 +46,6 @@ class MultiAgentEnv(gym.Env):
     @property
     def current_obs(self):
         raise NotImplementedError
+
+
+# TODO: create a UnityEnvironment MAEnv wrapper/adapter

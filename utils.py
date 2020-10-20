@@ -59,7 +59,7 @@ def discount_rewards_to_go(rewards: Tensor, dones: Tensor, gamma: float = 1., ba
     """
     Computes the discounted rewards to go, handling episode endings. Nothing unusual.
     """
-    if batch_mode:
+    if batch_mode:  # for the RNN-compatible case
         current_reward = 0
         discounted_rewards = []
         for reward in rewards.flip(0):
@@ -77,6 +77,36 @@ def discount_rewards_to_go(rewards: Tensor, dones: Tensor, gamma: float = 1., ba
             current_reward = reward + gamma * current_reward
             discounted_rewards.insert(0, current_reward)
         return torch.tensor(discounted_rewards)
+
+
+def discount_td_rewards(rewards_batch: Tensor,
+                        values_batch: Tensor,
+                        dones_batch: Tensor,
+                        gamma: float = 0.99,
+                        tau: float = 0.95) -> Tuple[Tensor, Tensor]:
+    """An alternative TD-based method of return-to-go and advantage estimation via GAE"""
+    returns_batch = []
+    advantages_batch = []
+    returns = values_batch[-1]
+    advantages = 0
+
+    for i in reversed(range(len(dones_batch) - 1)):
+        terminals = ~dones_batch[i]
+
+        rewards = rewards_batch[i]
+        value = values_batch[i]
+        next_value = values_batch[i + 1]
+
+        returns = rewards + gamma * terminals * returns  # v(s) = r + y*v(s+1)
+
+        # calc. of discounted advantage = A(s,a) + y^1*A(s+1,a+1) + ...
+        td_error = rewards + gamma * terminals * next_value.detach() - value.detach()  # td_err=q(s,a) - v(s)
+        advantages = advantages * tau * gamma * terminals + td_error
+
+        advantages_batch.insert(0, advantages)
+        returns_batch.insert(0, returns)
+
+    return torch.tensor(returns_batch), torch.tensor(advantages_batch)
 
 
 def get_optimizer(opt_name: str) -> Callable[..., Optimizer]:
@@ -161,7 +191,7 @@ def get_initializer(init_name: str) -> Callable[[Tensor], None]:
 
 class Timer:
     """
-    Simple timer to get temporal metrics. Upon calling .checkpoint(), returns the time since the last call of
+    Simple timer to get temporal metrics. Upon calling .checkpoint(), returns the time since the last call
     """
 
     def __init__(self):
@@ -295,39 +325,6 @@ def entropy_center(p: float, n: int) -> float:
     return entropy(probs)
 
 
-def get_goal_ratio(reward_batch: Tensor,
-                   done_batch: Tensor,
-                   goal_reward: float = 0.6,
-                   step_reward: float = -0.01) -> float:
-    """Computes the ratio of correctly finished episodes to all episodes in a batch"""
-
-    last_rewards = reward_batch[
-                       done_batch].cpu().numpy() - step_reward  # get all episode end rewards, add the step penalty
-    last_rewards = np.round(last_rewards, 4)  # round to avoid floating point errors
-    total_eps = len(last_rewards)
-    correct_eps = np.sum(last_rewards >= goal_reward)
-
-    return correct_eps / total_eps
-
-
-def sample_random_partner(returns: List[float]) -> int:
-    """
-    Samples a random skill level, and then returns the index closest to that skill level
-    Args:
-        returns: list of agents' returns
-
-    Returns:
-        index of the sampled agent
-    """
-    returns = np.array(returns)
-    min_value, max_value = np.min(returns), np.max(returns)
-
-    random_skill = np.random.uniform(min_value, max_value)
-
-    idx = np.argmin(np.abs(returns - random_skill))
-    return int(idx)
-
-
 def batch_to_gpu(data_batch: AgentDataBatch) -> AgentDataBatch:
     new_batch = {}
     for key in data_batch:
@@ -336,3 +333,80 @@ def batch_to_gpu(data_batch: AgentDataBatch) -> AgentDataBatch:
         else:
             new_batch[key] = data_batch[key].cuda()
     return new_batch
+
+
+def matrix_diag(diagonal: Tensor):
+    N = diagonal.shape[-1]
+    shape = diagonal.shape[:-1] + (N, N)
+    device, dtype = diagonal.device, diagonal.dtype
+    result = torch.zeros(shape, dtype=dtype, device=device)
+    indices = torch.arange(result.numel(), device=device).reshape(shape)
+    indices = indices.diagonal(dim1=-2, dim2=-1)
+    result.view(-1)[indices] = diagonal
+    return result
+
+
+def minibatches(data: Dict[str, Tensor], batch_size: int, shuffle: bool = True) -> Tuple[Tensor, Dict[str, Tensor]]:
+    batch_start = 0
+    batch_end = batch_size
+    data_size = len(data['dones'])
+
+    if shuffle:
+        indices = torch.randperm(data_size)
+        data = {k: val[indices] for k, val in data.items()}
+    else:
+        indices = torch.arange(data_size)
+
+    while batch_start < data_size:
+        batch = {key: value[batch_start:batch_end] for key, value in data.items()}
+
+        batch_start = batch_end
+        batch_end = min(batch_start + batch_size, data_size)
+
+        yield indices[batch_start:batch_end], batch
+
+
+class Batcher:
+
+    def __init__(self, batch_size, data):
+        self.batch_size = batch_size  # 2
+        self.data = data  # [array[0,1,2,...65]]
+        self.num_entries = len(data[0])  # 66
+
+        self.batch_start = 0
+        self.batch_end = 0
+
+        self.reset()
+
+
+    def reset(self):
+        self.batch_start = 0
+        self.batch_end = self.batch_start + self.batch_size
+
+    def end(self):
+        return self.batch_start >= self.num_entries
+
+    def next_batch(self):
+        batch = []
+        for d in self.data:
+            batch.append(d[self.batch_start: self.batch_end])
+        self.batch_start = self.batch_end
+        self.batch_end = min(self.batch_start + self.batch_size, self.num_entries)
+        return batch
+
+    def shuffle(self):
+        indices = np.arange(self.num_entries)
+        np.random.shuffle(indices)
+        self.data = [d[indices] for d in self.data]
+        # print (self.data)
+
+
+def index_data(data: DataBatch, indices: Tensor) -> DataBatch:
+    return {k: val[indices] for k, val in data.items()}
+
+
+def unpack():
+    pass
+
+def pack():
+    pass

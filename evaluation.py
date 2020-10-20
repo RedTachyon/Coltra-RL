@@ -13,7 +13,7 @@ from tqdm import tqdm
 from agents import Agent
 from base_env import MultiAgentEnv
 from models import BaseModel
-from rollout import Collector
+from collectors import Collector
 from utils import get_episode_lens
 
 
