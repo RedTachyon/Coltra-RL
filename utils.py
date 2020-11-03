@@ -1,8 +1,9 @@
-from typing import Dict, List, Union, Tuple, Any, Callable, Type, Optional, Iterator
+from typing import Dict, List, Union, Tuple, Any, Callable, Type, Optional, Iterator, Sequence
 
 import numpy as np
 
 import torch
+from mlagents_envs.environment import UnityEnvironment
 from torch import nn
 from torch import Tensor
 import torch.nn.functional as F
@@ -20,9 +21,12 @@ from collections import defaultdict
 
 from torch.utils.tensorboard import SummaryWriter
 
+# TODO: clean this up probably
 
+# TODO: make this into a better data structure?
 DataBatch = DataBatchT = Dict[str, Dict[str, Any]]
 AgentDataBatch = Dict[str, Union[Tensor, Tuple]]
+Array = Union[Tensor, np.ndarray]
 
 
 def np_float(x: float) -> np.ndarray:
@@ -284,6 +288,21 @@ def concat_batches(batches: List[AgentDataBatch]) -> AgentDataBatch:
     return merged
 
 
+def concat_crowd_batch(batches: DataBatchT, exclude: List[str] = None) -> AgentDataBatch:
+    """Concatenate multiple sets of data in a single batch"""
+    if exclude is None:
+        exclude = ["__all__"]
+
+    batches = {key: value for key, value in batches.items() if key not in exclude}
+    agents = list(batches.keys())
+
+    merged = {}
+    for key in batches[agents[0]]:
+        merged[key] = torch.cat([batch[key] for batch in batches.values()], dim=0)
+
+    return merged
+
+
 def write_dict(metrics: Dict[str, Union[int, float]],
                step: int,
                writer: Optional[SummaryWriter] = None):
@@ -405,8 +424,26 @@ def index_data(data: DataBatch, indices: Tensor) -> DataBatch:
     return {k: val[indices] for k, val in data.items()}
 
 
-def unpack():
-    pass
+def pack(value_dict: Dict[str, Array]) -> Tuple[Array, List[str]]:
+    keys = list(value_dict.keys())
+    if isinstance(value_dict[keys[0]], np.ndarray):
+        values = np.array([value_dict[key] for key in keys])
+    else:
+        values = torch.tensor([value_dict[key] for key in keys])
 
-def pack():
-    pass
+    return values, keys
+
+
+def unpack(values: Array, keys: List[str]) -> Dict[str, Array]:
+    value_dict = {key: values[i] for i, key in enumerate(keys)}
+    return value_dict
+
+
+def tanh_norm(x: Tensor, a: float, b: float):
+    """Transforms the input via tanh to be in the [a, b] range"""
+    return (b-a) * (1 + torch.tanh(x)) / 2 + a
+
+
+def atanh_unnorm(y: Tensor, a: float, b: float):
+    """Inverse to the above function w.r.t. the first input, with parameters a,b unchanged"""
+    return torch.atanh(2 / (b-a) * (y - a) - 1)

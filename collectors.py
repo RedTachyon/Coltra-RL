@@ -9,8 +9,8 @@ from tqdm import trange
 
 from agents import BaseAgent, Agent, StillAgent, RandomAgent
 from preprocessors import simple_padder
-from utils import DataBatch, with_default_config, np_float, transpose_batch, concat_batches, unpack, pack
-from base_env import MultiAgentEnv
+from utils import DataBatch, with_default_config, np_float, transpose_batch, concat_batches, pack, unpack
+from environments import MultiAgentEnv
 
 T = TypeVar('T')
 
@@ -24,7 +24,8 @@ def append_dict(var: Dict[str, T], data_dict: Dict[str, List[T]]):
         data_dict: lists to be appended to
     """
     for key, value in var.items():
-        data_dict[key].append(value)
+        data_dict.setdefault(key, []).append(value)  # variant to allow for new agents to be created in real time
+        # data_dict[key].append(value)
 
 
 class Memory:
@@ -50,22 +51,20 @@ class Memory:
     }
     """
 
-    def __init__(self, agents: List[str], fields: List[str] = None):
+    def __init__(self, fields: List[str] = None):
         """
         Creates the memory container. The only argument is a list of agent names to set up the dictionaries.
 
         Args:
-            agents: names of agents
+            fields: names of fields to store in memory
         """
         if fields is None:
             self.fields = ['observations', 'actions', 'rewards', 'logprobs', 'dones']
         else:
             self.fields = fields
 
-        self.agents = agents
-
         self.data = {
-            field: {agent: [] for agent in self.agents}
+            field: {}
             for field in self.fields
         }
 
@@ -73,26 +72,35 @@ class Memory:
         update = args
         for key, var in zip(self.data, update):
             append_dict(var, self.data[key])
+            # append_dict(var, self.data.setdefault(key, {}))
 
     def reset(self):
         for key in self.data:
-            self.data[key] = {agent: [] for agent in self.agents}
+            self.data[key] = {}
 
-    def apply_to_agent(self, func: Callable) -> Dict[str, Any]:
+    def apply_to_dict(self, func: Callable, d: Dict):
         return {
-            agent: func(agent) for agent in self.agents
+            key: func(key) for key in d
         }
 
     def get_torch_data(self) -> DataBatch:
         """
         Gather all the recorded data into torch tensors (still keeping the dictionary structure)
         """
+
+        # The first version is old and worked, the second one is shorter and should work too
         torch_data = {
-            field: self.apply_to_agent(lambda agent: torch.tensor(self.data[field][agent]))
-            for field in self.fields
+            # field_name: self.apply_to_dict(lambda agent: torch.tensor(self.data[field_name][agent]), field)
+            field_name: {agent: torch.tensor(field[agent]) for agent in field}
+            for field_name, field in self.data.items()
         }
 
         return torch_data
+
+    def set_done(self):
+        assert 'dones' in self.data, "Must collect dones in the memory"
+        for data in self.data['dones'].values():
+            data[-1] = True
 
     def __getitem__(self, item):
         return self.data[item]
@@ -101,24 +109,22 @@ class Memory:
         return self.data.__str__()
 
 
-class Collector:
+class CrowdCollector:
     """
     Class to perform data collection from two agents.
     """
 
-    def __init__(self, agents: Dict[str, BaseAgent], env: MultiAgentEnv):
-        self.agents = agents
-        self.agent_ids: List[str] = list(self.agents.keys())
+    def __init__(self, agent: Agent, env: MultiAgentEnv):
+        self.agent = agent
         self.env = env
-        self.memory = Memory(self.agent_ids)
-
+        self.memory = Memory(['observations', 'actions', 'rewards', 'logprobs', 'dones'])
 
     def collect_data(self,
                      num_steps: Optional[int] = None,
                      num_episodes: Optional[int] = None,
-                     deterministic: Optional[Dict[str, bool]] = None,
+                     deterministic: bool = False,
                      disable_tqdm: bool = True,
-                     max_steps: int = 102,
+                     max_steps: int = 5000,
                      reset_memory: bool = True,
                      include_last: bool = False,
                      reset_start: bool = True,
@@ -165,18 +171,17 @@ class Collector:
         assert not ((num_steps is None) == (num_episodes is None)), ValueError("Exactly one of num_steps, num_episodes "
                                                                                "should receive a value")
 
-        if deterministic is None:
-            deterministic = {agent_id: False for agent_id in self.agent_ids}
-
         if reset_memory:  # clears the memory cache
             self.reset()
 
         if reset_start:
-            self.env.reset()
+            obs_dict = self.env.reset()
+        else:
+            obs_dict = self.env.current_obs
 
-        state = {
-            agent_id: self.agents[agent_id].get_initial_state(requires_grad=False) for agent_id in self.agent_ids
-        }
+        # state = {
+        #     agent_id: self.agents[agent_id].get_initial_state(requires_grad=False) for agent_id in self.agent_ids
+        # }
 
         episode = 0
 
@@ -184,33 +189,39 @@ class Collector:
         full_steps = (num_steps + 100 * int(finish_episode)) if num_steps else max_steps * num_episodes
         for step in trange(full_steps, disable=disable_tqdm):
             # Compute the action for each agent
-            action_info = {  # action, logprob, entropy, state, sm
-                agent_id: self.agents[agent_id].compute_single_action(obs[agent_id],
-                                                                      state[agent_id],
-                                                                      deterministic[agent_id])
-                for agent_id in self.agent_ids
-            }
+            # action_info = {  # action, logprob, entropy, state, sm
+            #     agent_id: self.agents[agent_id].compute_single_action(obs[agent_id],
+            #                                                           # state[agent_id],
+            #                                                           deterministic[agent_id])
+            #     for agent_id in obs
+            # }
 
-            # Unpack the actions
-            action = {agent_id: action_info[agent_id][0] for agent_id in self.agent_ids}
-            logprob = {agent_id: action_info[agent_id][1] for agent_id in self.agent_ids}
-            next_state = {agent_id: action_info[agent_id][2] for agent_id in self.agent_ids}
-            sm_pred = {agent_id: action_info[agent_id][3] for agent_id in self.agent_ids}
+            # TODO: have a separate agent for each behavior in the environment
+            # TODO: reintroduce recurrent state management
+
+            obs_array, agent_keys = pack(obs_dict)
+            obs_tensor = torch.tensor(obs_array)
+
+            # Centralize the action computation for better parallelization
+            actions, logprobs, _ = self.agent.compute_actions(obs_tensor, (), deterministic)
+
+            action_dict = unpack(actions, agent_keys)
+            logprob_dict = unpack(logprobs, agent_keys)
 
             # Actual step in the environment
-            next_obs, reward, done, info = self.env.step(action)
+            next_obs, reward_dict, done_dict, info = self.env.step(action_dict)
 
             # Saving to memory
-            self.memory.store(obs, action, reward, logprob, done, state)
+            self.memory.store(obs_dict, action_dict, reward_dict, logprob_dict, done_dict)
 
             # Handle episode/loop ending
             if finish_episode and step + 1 == num_steps:
                 end_flag = True
 
             # Update the current obs and state - either reset, or keep going
-            if all(done.values()):  # episode is over
+            if done_dict["__all__"]:  # episode is over
                 if include_last:  # record the last observation along with placeholder action/reward/logprob
-                    self.memory.store(next_obs, action, reward, logprob, done, next_state)
+                    self.memory.store(next_obs, action_dict, reward_dict, logprob_dict, done_dict)
 
                 # Episode mode handling
                 episode += 1
@@ -222,33 +233,26 @@ class Collector:
                     break
 
                 # If we didn't end, create a new environment
-                obs = self.env.reset()
-
-                state = {
-                    agent_id: self.agents[agent_id].get_initial_state(requires_grad=False)
-                    for agent_id in self.agent_ids
-                }
+                obs_dict = self.env.reset()
 
             else:  # keep going
-                obs = next_obs
-                state = next_state
+                obs_dict = next_obs
+
+        self.memory.set_done()
 
         return self.memory.get_torch_data()
 
     def reset(self):
         self.memory.reset()
 
-    def change_agent(self, agents_to_replace: Dict[str, BaseAgent]):
+    def change_agent(self, new_agent: Agent):
         """Replace the agents in the collector"""
-        for agent_id in agents_to_replace:
-            if agent_id in self.agents:
-                self.agents[agent_id] = agents_to_replace[agent_id]
+        self.agent = new_agent
 
-    def update_agent_state_dict(self, agents_to_update: Dict[str, Dict]):
+    def update_agent_state_dict(self, state_dict: OrderedDict):
         """Update the state dict of the agents in the collector"""
-        for agent_id in agents_to_update:
-            if agent_id in self.agents:
-                self.agents[agent_id].model.load_state_dict(agents_to_update[agent_id])
+        self.agent.model.load_state_dict(state_dict)
+
 
 if __name__ == '__main__':
     pass

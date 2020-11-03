@@ -16,7 +16,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import trange
 
 from agents import Agent
-from base_env import MultiAgentEnv
+from environments import MultiAgentEnv
 from utils import Timer, with_default_config, write_dict, transpose_batch, concat_batches, AgentDataBatch, DataBatch, \
     np_float, get_episode_rewards
 from collectors import Collector, collect_training_batch, collect_simple_batch

@@ -48,13 +48,13 @@ class MLPModel(BaseModel):
         super().__init__(config)
 
         default_config = {
-            "input_size": 21,
+            "input_size": 90,
             "num_actions": 2,
             "activation": "leaky_relu",
 
             "hidden_sizes": (64, 64),
 
-            "sigma0": 1.,
+            "sigma0": 0.1,
 
             "initializer": "kaiming_uniform",
         }
@@ -79,7 +79,6 @@ class MLPModel(BaseModel):
 
         if self.config["initializer"]:
             # If given an initializer, initialize all weights using it, and all biases with 0's
-            # TODO: decrease 10x the last layer values, according to WhatMatters
             initializer_ = get_initializer(self.config["initializer"])
 
             for layer in self.hidden_layers:
@@ -87,6 +86,7 @@ class MLPModel(BaseModel):
                 nn.init.zeros_(layer.bias)
 
             initializer_(self.policy_head.weight)
+            self.policy_head.weight.data /= 100.
             initializer_(self.value_head.weight)
 
             nn.init.zeros_(self.policy_head.bias)

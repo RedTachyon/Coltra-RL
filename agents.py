@@ -8,7 +8,7 @@ from models import BaseModel
 
 from typing import Tuple
 
-from utils import AgentDataBatch
+from utils import AgentDataBatch, tanh_norm, atanh_unnorm
 
 
 class BaseAgent:
@@ -68,9 +68,12 @@ class Agent(BaseAgent):
     """Agent variant for Continuous (Normal) action distributions"""
     model: BaseModel
 
-    def __init__(self, model: BaseModel):
+    def __init__(self, model: BaseModel,
+                 action_range: Tuple[float, float] = (-.3, 1.)):
+
         super().__init__(model)
         self.stateful = model.stateful
+        self.action_range = action_range
 
     def compute_actions(self, obs_batch: Tensor,
                         state_batch: Tuple = (),
@@ -99,7 +102,10 @@ class Agent(BaseAgent):
 
         logprobs = action_distribution.log_prob(actions).sum(1)
 
-        return actions, logprobs, states
+        a, b = self.action_range
+        out_actions = tanh_norm(actions, a, b)
+
+        return out_actions.detach().cpu().numpy(), logprobs.detach().cpu().numpy(), states
 
     def evaluate_actions(self, data_batch: AgentDataBatch,
                          padded: bool = False) -> Tuple[Tensor, Tensor, Tensor]:
@@ -111,6 +117,7 @@ class Agent(BaseAgent):
             data_batch: data collected from a Collector for this agent
             padded: whether the data is passed as 1D (not padded; [T*B, *]) or 2D (padded; [T, B, *]) tensor
 
+
         Returns:
             action_logprobs: tensor of action logprobs (batch_size, )
             values: tensor of observation values (batch_size, )
@@ -121,6 +128,8 @@ class Agent(BaseAgent):
         state_batch = data_batch['states']
 
         if not padded:  # BP or non-recurrent
+            a, b = self.action_range
+            action_batch = atanh_unnorm(action_batch, a, b)
             action_distribution, new_states, extra_outputs = self.model(obs_batch, state_batch)
             values = extra_outputs["value"]
             action_logprobs = action_distribution.log_prob(action_batch).sum(1)
@@ -128,7 +137,7 @@ class Agent(BaseAgent):
             entropies = action_distribution.entropy().sum(1)
 
         else:  # padded == True, BPTT
-            # TODO: Might not work, copied from Agent; useful if I want BPTT, but slower, otherwise useless
+            # TODO: Might not work, copied from DiscreteAgent; useful if I want BPTT, but slower, otherwise useless
             batch_size = obs_batch.size()[1]  # assume it's padded, so in [L, B, *] format
             state: Tuple[Tensor, ...] = self.get_initial_state()
             state = tuple(_state.repeat(batch_size, 1) for _state in state)
@@ -160,6 +169,7 @@ class Agent(BaseAgent):
 class StillAgent(BaseAgent):
     """DEPRECATED
     might be worth reviving"""
+
     def __init__(self, model: nn.Module = None, action_value: int = 4):
         super().__init__(model)
         self.action_value = action_value
@@ -178,7 +188,6 @@ class StillAgent(BaseAgent):
 
     def compute_single_action(self, obs: np.ndarray,
                               *args, **kwargs) -> Tuple[int, float, Tuple]:
-
         return self.action_value, 0., ()
 
     def evaluate_actions(self, data_batch: AgentDataBatch, padded: bool = False):
@@ -194,6 +203,7 @@ class StillAgent(BaseAgent):
 class RandomAgent(BaseAgent):
     """DEPRECATED
     might be worth reviving"""
+
     def __init__(self, model: nn.Module = None, action_value: int = 4):
         super().__init__(model)
         self.action_value = action_value
@@ -212,7 +222,6 @@ class RandomAgent(BaseAgent):
 
     def compute_single_action(self, obs: np.ndarray,
                               *args, **kwargs) -> Tuple[int, float, Tuple]:
-
         return torch.randint(0, self.action_value + 1, (1,)).item(), 0., ()
 
     def evaluate_actions(self, data_batch: AgentDataBatch, padded: bool = False):
