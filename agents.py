@@ -69,11 +69,11 @@ class Agent(BaseAgent):
     model: BaseModel
 
     def __init__(self, model: BaseModel,
-                 action_range: Tuple[float, float] = (-.3, 1.)):
+                 action_range: Tuple[Tensor, Tensor] = None):
 
         super().__init__(model)
         self.stateful = model.stateful
-        self.action_range = action_range
+        self.action_range = tuple((x.view(1, -1) for x in action_range))
 
     def compute_actions(self, obs_batch: Tensor,
                         state_batch: Tuple = (),
@@ -102,8 +102,11 @@ class Agent(BaseAgent):
 
         logprobs = action_distribution.log_prob(actions).sum(1)
 
-        a, b = self.action_range
-        out_actions = tanh_norm(actions, a, b)
+        if self.action_range:
+            a, b = self.action_range
+            out_actions = tanh_norm(actions, a, b)
+        else:
+            out_actions = actions
 
         return out_actions.detach().cpu().numpy(), logprobs.detach().cpu().numpy(), states
 
@@ -125,12 +128,13 @@ class Agent(BaseAgent):
         """
         obs_batch = data_batch['observations']
         action_batch = data_batch['actions']
-        state_batch = data_batch['states']
+        # state_batch = data_batch['states']
 
         if not padded:  # BP or non-recurrent
-            a, b = self.action_range
-            action_batch = atanh_unnorm(action_batch, a, b)
-            action_distribution, new_states, extra_outputs = self.model(obs_batch, state_batch)
+            if self.action_range:
+                a, b = self.action_range
+                action_batch = atanh_unnorm(action_batch, a, b)
+            action_distribution, new_states, extra_outputs = self.model(obs_batch)
             values = extra_outputs["value"]
             action_logprobs = action_distribution.log_prob(action_batch).sum(1)
             values = values.view(-1)
@@ -138,6 +142,7 @@ class Agent(BaseAgent):
 
         else:  # padded == True, BPTT
             # TODO: Might not work, copied from DiscreteAgent; useful if I want BPTT, but slower, otherwise useless
+            return NotImplementedError
             batch_size = obs_batch.size()[1]  # assume it's padded, so in [L, B, *] format
             state: Tuple[Tensor, ...] = self.get_initial_state()
             state = tuple(_state.repeat(batch_size, 1) for _state in state)

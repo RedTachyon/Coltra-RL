@@ -288,10 +288,12 @@ def concat_batches(batches: List[AgentDataBatch]) -> AgentDataBatch:
     return merged
 
 
-def concat_crowd_batch(batches: DataBatchT, exclude: List[str] = None) -> AgentDataBatch:
+def concat_crowd_batch(batches: DataBatch, exclude: List[str] = None) -> AgentDataBatch:
     """Concatenate multiple sets of data in a single batch"""
     if exclude is None:
         exclude = ["__all__"]
+
+    batches = transpose_batch(batches)
 
     batches = {key: value for key, value in batches.items() if key not in exclude}
     agents = list(batches.keys())
@@ -439,11 +441,11 @@ def unpack(values: Array, keys: List[str]) -> Dict[str, Array]:
     return value_dict
 
 
-def tanh_norm(x: Tensor, a: float, b: float):
+def tanh_norm(x: Tensor, a: Tensor, b: Tensor):
     """Transforms the input via tanh to be in the [a, b] range"""
     return (b-a) * (1 + torch.tanh(x)) / 2 + a
 
 
-def atanh_unnorm(y: Tensor, a: float, b: float):
+def atanh_unnorm(y: Tensor, a: Tensor, b: Tensor):
     """Inverse to the above function w.r.t. the first input, with parameters a,b unchanged"""
     return torch.atanh(2 / (b-a) * (y - a) - 1)

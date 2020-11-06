@@ -10,7 +10,7 @@ from tqdm import trange
 from agents import BaseAgent, Agent, StillAgent, RandomAgent
 from preprocessors import simple_padder
 from utils import DataBatch, with_default_config, np_float, transpose_batch, concat_batches, pack, unpack
-from environments import MultiAgentEnv
+from environments import MultiAgentEnv, UnityCrowdEnv
 
 T = TypeVar('T')
 
@@ -114,7 +114,7 @@ class CrowdCollector:
     Class to perform data collection from two agents.
     """
 
-    def __init__(self, agent: Agent, env: MultiAgentEnv):
+    def __init__(self, agent: Agent, env: UnityCrowdEnv):
         self.agent = agent
         self.env = env
         self.memory = Memory(['observations', 'actions', 'rewards', 'logprobs', 'dones'])
@@ -124,7 +124,7 @@ class CrowdCollector:
                      num_episodes: Optional[int] = None,
                      deterministic: bool = False,
                      disable_tqdm: bool = True,
-                     max_steps: int = 5000,
+                     max_steps: int = 500,
                      reset_memory: bool = True,
                      include_last: bool = False,
                      reset_start: bool = True,
@@ -186,7 +186,7 @@ class CrowdCollector:
         episode = 0
 
         end_flag = False
-        full_steps = (num_steps + 100 * int(finish_episode)) if num_steps else max_steps * num_episodes
+        full_steps = (num_steps + 500 * int(finish_episode)) if num_steps else max_steps * num_episodes
         for step in trange(full_steps, disable=disable_tqdm):
             # Compute the action for each agent
             # action_info = {  # action, logprob, entropy, state, sm
@@ -214,6 +214,10 @@ class CrowdCollector:
             # Saving to memory
             self.memory.store(obs_dict, action_dict, reward_dict, logprob_dict, done_dict)
 
+            # TODO fix: when the agent leaves the game, it receives one last observation. it's in the previous obs dict,
+            # but it doesn't receive a new reward
+
+
             # Handle episode/loop ending
             if finish_episode and step + 1 == num_steps:
                 end_flag = True
@@ -222,6 +226,7 @@ class CrowdCollector:
             if done_dict["__all__"]:  # episode is over
                 if include_last:  # record the last observation along with placeholder action/reward/logprob
                     self.memory.store(next_obs, action_dict, reward_dict, logprob_dict, done_dict)
+
 
                 # Episode mode handling
                 episode += 1
@@ -236,7 +241,7 @@ class CrowdCollector:
                 obs_dict = self.env.reset()
 
             else:  # keep going
-                obs_dict = next_obs
+                obs_dict = {key: obs for key, obs in next_obs.items() if key in self.env.active_agents}
 
         self.memory.set_done()
 

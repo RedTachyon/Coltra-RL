@@ -19,17 +19,16 @@ from agents import Agent
 from environments import MultiAgentEnv
 from utils import Timer, with_default_config, write_dict, transpose_batch, concat_batches, AgentDataBatch, DataBatch, \
     np_float, get_episode_rewards
-from collectors import Collector, collect_training_batch, collect_simple_batch
-from policy_optimization import PPOptimizer
+from collectors import CrowdCollector
+from policy_optimization import CrowdPPOptimizer
 
 
 class Trainer:
     def __init__(self,
-                 agents: Dict[str, Agent],
+                 agent: Agent,
                  env: MultiAgentEnv,
                  config: Dict[str, Any]):
-        self.agents = agents
-        self.agent_ids: List[str] = list(self.agents.keys())
+        self.agent = agent
         self.env = env
         self.config = config
 
@@ -40,24 +39,19 @@ class Trainer:
         raise NotImplementedError
 
 
-class PPOSimpleTrainer(Trainer):
+class PPOCrowdTrainer(Trainer):
     """This performs training in a sampling paradigm, where each agent is stored, and during data collection,
     some part of the dataset is collected with randomly sampled old agents"""
 
-    def __init__(self, agents: Dict[str, Agent], env: MultiAgentEnv, config: Dict[str, Any]):
-        super().__init__(agents, env, config)
+    def __init__(self, agent: Agent, env: MultiAgentEnv, config: Dict[str, Any]):
+        super().__init__(agent, env, config)
 
         default_config = {
-            "agents_to_optimize": ["Agent0"],  # ids of agents that should be optimized
-            "steps": 10000,  # number of steps we want in one PPO step
+            # "steps": 10000,  # number of steps we want in one PPO step
+            "episodes": 1,  # number of episodes to collect
 
             # Tensorboard settings
             "tensorboard_name": None,  # str, set explicitly
-
-            # Collector
-            "collector_config": {
-                "finish_episode": True,
-            },
 
             # PPO
             "ppo_config": {
@@ -81,15 +75,14 @@ class PPOSimpleTrainer(Trainer):
                 "max_grad_norm": 0.5,
 
                 # Backpropagation settings
-                "pad_sequences": False,  # BPTT toggle
                 "use_gpu": False,
             }
         }
 
         self.config = with_default_config(config, default_config)
 
-        self.collector = Collector(agents=self.agents, env=self.env, config=self.config["collector_config"])
-        self.ppo = PPOptimizer(agents={"Agent0": agents["Agent0"]}, config=self.config["ppo_config"])
+        self.collector = CrowdCollector(agent=self.agent, env=self.env)
+        self.ppo = CrowdPPOptimizer(self.agent, config=self.config["ppo_config"])
 
         # Setup tensorboard
         self.writer: SummaryWriter
@@ -104,9 +97,8 @@ class PPOSimpleTrainer(Trainer):
             with open(str(self.path / "trainer_config.json"), "w") as f:
                 json.dump(self.config, f)
 
-            for agent_id in self.agent_ids:
-                with open(str(self.path / f"{agent_id}_config.json"), "w") as f:
-                    json.dump(self.agents[agent_id].model.config, f)
+            with open(str(self.path / f"crowd_config.json"), "w") as f:
+                json.dump(self.agent.model.config, f)
 
             with open(str(self.path / "env_config.json"), "w") as f:
                 try:
@@ -133,21 +125,18 @@ class PPOSimpleTrainer(Trainer):
         step_timer = Timer()
 
         # Store the first agent
-        saved_agents = [copy.deepcopy(self.agents["Agent0"].model.state_dict())]
+        # saved_agents = [copy.deepcopy(self.agent.model.state_dict())]
 
         # List to keep each agent's mean return as a crude skill approximation
-        old_returns = []
-
-        self_skill = np_float(1.)
 
         if save_path:
-            torch.save(self.agents["Agent0"].model, os.path.join(save_path, "base_agent.pt"))
+            torch.save(self.agent.model, os.path.join(save_path, "base_agent.pt"))
 
         for step in trange(num_iterations, disable=disable_tqdm):
             ########################################### Collect the data ###############################################
             timer.checkpoint()
 
-            full_batch = self.collector.collect_data(num_steps=self.config["steps"])
+            full_batch = self.collector.collect_data(num_episodes=1)
 
             data_time = timer.checkpoint()
 
@@ -161,22 +150,19 @@ class PPOSimpleTrainer(Trainer):
             ########################################## Save the updated agent ##########################################
 
             # Save the agent
-            saved_agents.append(copy.deepcopy(self.agents["Agent0"].model.state_dict()))
+            # saved_agents.append(copy.deepcopy(self.agents["Agent0"].model.state_dict()))
 
             # Save the agent to disk
             if save_path:
                 # torch.save(old_returns, os.path.join(save_path, "returns.pt"))
-                torch.save(self.agents["Agent0"].model.state_dict(),
+                torch.save(self.agent.model.state_dict(),
                            os.path.join(save_path, "saved_weights", f"weights_{step + 1}"))
 
             # Write training time metrics to tensorboard
-            time_metric = {f"{agent_id}/time_data_collection": data_time for agent_id in self.ppo.agent_ids}
-            final_metric = {f"{agent_id}/total_time": end_time for agent_id in self.ppo.agent_ids}
+            time_metric = {f"crowd/time_data_collection": data_time,
+                           f"crowd/total_time": end_time}
 
             write_dict(time_metric, step, self.writer)
-            write_dict(final_metric, step, self.writer)
-
-
 
 
 if __name__ == '__main__':
